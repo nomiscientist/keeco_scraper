@@ -8,9 +8,7 @@ from dotenv import load_dotenv
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium import webdriver
-from webdriver_manager.chrome import ChromeDriverManager
+import undetected_chromedriver as uc
 import unicodedata
 from ftfy import fix_text
 
@@ -26,9 +24,29 @@ if not keeco_username or not keeco_password:
     print("Error: KEECO_USERNAME and KEECO_PASSWORD environment variables must be set.")
     sys.exit(1)
 
-# Initialize WebDriver
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service)
+# Initialize Chrome options with debugging
+chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+print(f"Using Chrome from: {chrome_path}")
+
+chrome_options = uc.ChromeOptions()
+chrome_options.add_argument("--headless=new")
+chrome_options.add_argument("--window-size=1920,1080")
+chrome_options.binary_location = chrome_path
+
+# Initialize WebDriver with options and error handling
+try:
+    print("Starting undetected-chromedriver...")
+    driver = uc.Chrome(
+        options=chrome_options,
+        version_main=133  # Chrome version 133.0.6943.53
+    )
+    print("WebDriver initialized successfully")
+    
+except Exception as e:
+    print(f"Failed to initialize WebDriver: {str(e)}")
+    print(f"Chrome path exists: {os.path.exists(chrome_path)}")
+    sys.exit(1)
+
 
 # Function to log in
 def login_to_site():
@@ -53,33 +71,54 @@ def login_to_site():
         driver.quit()
         sys.exit(1)
 
+def extract_variant_size(product_name, parent_name):
+    """Extract the variant-specific size/type from the product name."""
+    if not product_name or not parent_name:
+        return ""
+    # Remove parent name from product name to get variant-specific info
+    variant = product_name.replace(parent_name, "").strip(" -")
+    return variant if variant else product_name
+
+def parse_dimensions(dimension_str):
+    """Parse dimension string to extract size-specific dimensions."""
+    if not dimension_str:
+        return {}
+    # Split by common delimiters
+    parts = re.split(r'[,.]', dimension_str)
+    size_dimensions = {}
+    
+    for part in parts:
+        # Look for size pattern followed by dimensions
+        match = re.match(r'(.*?)\s*-\s*([^-]+)$', part.strip())
+        if match:
+            size, dims = match.groups()
+            size_dimensions[size.strip()] = dims.strip()
+    return size_dimensions
+
 # Function to scrape product details from the product page
 def scrape_product_page(product_url):
     driver.get(product_url)
     try:
-        # Wait for the product page to load
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "#product-content"))
         )
 
-        # Initialize the product data dictionary
         product_data = {"url": product_url}
 
-        # Extract product name
+        # Extract parent product name
         try:
             parent_product_name = driver.find_element(By.CSS_SELECTOR, "#product-content > h1 > div.product-name").text.strip()
             product_data["parent_name"] = parent_product_name
         except Exception:
             product_data["parent_name"] = "N/A"
 
-        # Extract long description
+        # Extract other basic information
         try:
             long_description = driver.find_element(By.CSS_SELECTOR, "#product-content > div.product-long-description").text.strip()
             product_data["long_description"] = long_description
         except Exception:
             product_data["long_description"] = "N/A"
 
-        # Extract product information
         try:
             product_information = driver.find_element(By.CSS_SELECTOR, "#product-content > div.product-information").text.strip()
             product_data["product_information"] = product_information
@@ -94,52 +133,71 @@ def scrape_product_page(product_url):
         except Exception:
             product_data["images"] = []
 
-        # Extract table data (Item, Product Name, Price/Unit, Unit/Case)
-        try:
-            table_container = driver.find_element(By.CSS_SELECTOR, ".order-table")
-            table_headers = table_container.find_elements(By.TAG_NAME, "th")
-    
-            # Get the header text and corresponding index
-            header_mapping = [header.text.strip() for header in table_headers]
-            print(f"DEBUG: Table headers: {header_mapping}")
-    
-            # Extract table rows
-            table_rows = table_container.find_elements(By.TAG_NAME, "tr")
-            table_data = []
-    
-            for row in table_rows[1:]:  # Skip the header row
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) == len(header_mapping):  # Ensure the row matches the header count
-                    table_data.append({
-                        "item": cols[header_mapping.index("Item")].text.strip() if "Item" in header_mapping else "",
-                        "type_size": cols[header_mapping.index("Product Name")].text.strip() if "Product Name" in header_mapping else "",
-                        "price_per_unit": cols[header_mapping.index("Price/Unit")].text.strip() if "Price/Unit" in header_mapping else "",
-                        "units_per_case": cols[header_mapping.index("Unit/Case")].text.strip() if "Unit/Case" in header_mapping else "",
-                    })
-                else:
-                    print(f"DEBUG: Skipped row with mismatched column count: {[col.text for col in cols]}")
-    
-            product_data["table_data"] = table_data
-        except Exception as e:
-            product_data["table_data"] = []
-            print(f"DEBUG: Failed to extract table data: {e}")
-
-        # Extract dynamic specs (Details)
+        # Extract details section first to map variant-specific details
         try:
             detail_section = driver.find_element(By.CSS_SELECTOR, "#detail")
+            details = {}
             keys = detail_section.find_elements(By.CSS_SELECTOR, ".col-1")
             values = detail_section.find_elements(By.CSS_SELECTOR, ".col-2")
-
-            # Map keys to values dynamically
-            details = {}
+            
             for key, value in zip(keys, values):
-                details[key.text.strip()] = value.text.strip()
+                key_text = key.text.strip()
+                value_text = value.text.strip()
+                details[key_text] = value_text
+                
+                # Parse dimensions and other size-specific details
+                if key_text == "Dimensions":
+                    details["dimensions_by_size"] = parse_dimensions(value_text)
+                elif key_text == "Fill Weight":
+                    details["weights_by_size"] = parse_dimensions(value_text)
+
             product_data["details"] = details
         except Exception as e:
             product_data["details"] = {}
             print(f"DEBUG: Failed to extract details: {e}")
 
-        print(f"Scraped product data: {product_data}")
+        # Extract and process table data
+        try:
+            table_container = driver.find_element(By.CSS_SELECTOR, ".order-table")
+            table_headers = table_container.find_elements(By.TAG_NAME, "th")
+            header_mapping = [header.text.strip() for header in table_headers]
+            
+            table_rows = table_container.find_elements(By.TAG_NAME, "tr")
+            table_data = []
+            
+            for row in table_rows[1:]:  # Skip header row
+                cols = row.find_elements(By.TAG_NAME, "td")
+                if len(cols) == len(header_mapping):
+                    row_data = {}
+                    for idx, header in enumerate(header_mapping):
+                        cell_text = cols[idx].text.strip()
+                        if header == "Product Name":
+                            # Extract only the variant-specific part
+                            row_data["type_size"] = extract_variant_size(cell_text, product_data["parent_name"])
+                        else:
+                            row_data[header.lower().replace("/", "_per_")] = cell_text
+                    
+                    # Map corresponding details for this variant
+                    variant_size = row_data["type_size"]
+                    if "dimensions_by_size" in product_data["details"]:
+                        for size, dims in product_data["details"]["dimensions_by_size"].items():
+                            if size.lower() in variant_size.lower():
+                                row_data["dimensions"] = dims
+                                break
+                    
+                    if "weights_by_size" in product_data["details"]:
+                        for size, weight in product_data["details"]["weights_by_size"].items():
+                            if size.lower() in variant_size.lower():
+                                row_data["fill_weight"] = weight
+                                break
+                    
+                    table_data.append(row_data)
+            
+            product_data["table_data"] = table_data
+        except Exception as e:
+            product_data["table_data"] = []
+            print(f"DEBUG: Failed to extract table data: {e}")
+
         return product_data
 
     except Exception as e:
