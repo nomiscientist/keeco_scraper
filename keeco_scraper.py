@@ -20,33 +20,34 @@ load_dotenv(dotenv_path)
 keeco_username = os.getenv('KEECO_USERNAME')
 keeco_password = os.getenv('KEECO_PASSWORD')
 
+print("Debug: Checking environment variables:")
+print(f"Debug: .env file path: {os.path.abspath(dotenv_path)}")
+print(f"Debug: KEECO_USERNAME is {'set' if keeco_username else 'not set'}")
+print(f"Debug: KEECO_PASSWORD is {'set' if keeco_password else 'not set'}")
+
 if not keeco_username or not keeco_password:
     print("Error: KEECO_USERNAME and KEECO_PASSWORD environment variables must be set.")
     sys.exit(1)
 
-# Initialize Chrome options with debugging
-chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-print(f"Using Chrome from: {chrome_path}")
-
-chrome_options = uc.ChromeOptions()
-chrome_options.add_argument("--headless=new")
-chrome_options.add_argument("--window-size=1920,1080")
-chrome_options.binary_location = chrome_path
-
-# Initialize WebDriver with options and error handling
+# Initialize WebDriver with undetected-chromedriver
 try:
-    print("Starting undetected-chromedriver...")
-    driver = uc.Chrome(
-        options=chrome_options,
-        version_main=133  # Chrome version 133.0.6943.53
-    )
-    print("WebDriver initialized successfully")
+    print("Initializing Chrome WebDriver...")
+    options = uc.ChromeOptions()
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    # Remove headless mode as it can cause issues with undetected-chromedriver
+    # options.add_argument('--headless')
     
+    # Use version_main to specify your Chrome version
+    driver = uc.Chrome(
+        options=options,
+        version_main=132  # Specify your Chrome version here
+    )
+    driver.set_window_size(1920, 1080)  # Set a standard window size
+    print("WebDriver initialized successfully!")
 except Exception as e:
-    print(f"Failed to initialize WebDriver: {str(e)}")
-    print(f"Chrome path exists: {os.path.exists(chrome_path)}")
+    print(f"Error initializing WebDriver: {e}")
     sys.exit(1)
-
 
 # Function to log in
 def login_to_site():
@@ -71,54 +72,33 @@ def login_to_site():
         driver.quit()
         sys.exit(1)
 
-def extract_variant_size(product_name, parent_name):
-    """Extract the variant-specific size/type from the product name."""
-    if not product_name or not parent_name:
-        return ""
-    # Remove parent name from product name to get variant-specific info
-    variant = product_name.replace(parent_name, "").strip(" -")
-    return variant if variant else product_name
-
-def parse_dimensions(dimension_str):
-    """Parse dimension string to extract size-specific dimensions."""
-    if not dimension_str:
-        return {}
-    # Split by common delimiters
-    parts = re.split(r'[,.]', dimension_str)
-    size_dimensions = {}
-    
-    for part in parts:
-        # Look for size pattern followed by dimensions
-        match = re.match(r'(.*?)\s*-\s*([^-]+)$', part.strip())
-        if match:
-            size, dims = match.groups()
-            size_dimensions[size.strip()] = dims.strip()
-    return size_dimensions
-
 # Function to scrape product details from the product page
 def scrape_product_page(product_url):
     driver.get(product_url)
     try:
+        # Wait for the product page to load
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "#product-content"))
         )
 
+        # Initialize the product data dictionary
         product_data = {"url": product_url}
 
-        # Extract parent product name
+        # Extract product name
         try:
             parent_product_name = driver.find_element(By.CSS_SELECTOR, "#product-content > h1 > div.product-name").text.strip()
             product_data["parent_name"] = parent_product_name
         except Exception:
             product_data["parent_name"] = "N/A"
 
-        # Extract other basic information
+        # Extract long description
         try:
             long_description = driver.find_element(By.CSS_SELECTOR, "#product-content > div.product-long-description").text.strip()
             product_data["long_description"] = long_description
         except Exception:
             product_data["long_description"] = "N/A"
 
+        # Extract product information
         try:
             product_information = driver.find_element(By.CSS_SELECTOR, "#product-content > div.product-information").text.strip()
             product_data["product_information"] = product_information
@@ -133,71 +113,73 @@ def scrape_product_page(product_url):
         except Exception:
             product_data["images"] = []
 
-        # Extract details section first to map variant-specific details
-        try:
-            detail_section = driver.find_element(By.CSS_SELECTOR, "#detail")
-            details = {}
-            keys = detail_section.find_elements(By.CSS_SELECTOR, ".col-1")
-            values = detail_section.find_elements(By.CSS_SELECTOR, ".col-2")
-            
-            for key, value in zip(keys, values):
-                key_text = key.text.strip()
-                value_text = value.text.strip()
-                details[key_text] = value_text
-                
-                # Parse dimensions and other size-specific details
-                if key_text == "Dimensions":
-                    details["dimensions_by_size"] = parse_dimensions(value_text)
-                elif key_text == "Fill Weight":
-                    details["weights_by_size"] = parse_dimensions(value_text)
-
-            product_data["details"] = details
-        except Exception as e:
-            product_data["details"] = {}
-            print(f"DEBUG: Failed to extract details: {e}")
-
-        # Extract and process table data
+        # Extract table data (Item, Product Name, Price/Unit, Unit/Case)
         try:
             table_container = driver.find_element(By.CSS_SELECTOR, ".order-table")
             table_headers = table_container.find_elements(By.TAG_NAME, "th")
+    
+            # Get the header text and corresponding index
             header_mapping = [header.text.strip() for header in table_headers]
-            
+            print(f"DEBUG: Table headers: {header_mapping}")
+    
+            # Extract table rows
             table_rows = table_container.find_elements(By.TAG_NAME, "tr")
             table_data = []
-            
-            for row in table_rows[1:]:  # Skip header row
+    
+            for row in table_rows[1:]:  # Skip the header row
                 cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) == len(header_mapping):
-                    row_data = {}
-                    for idx, header in enumerate(header_mapping):
-                        cell_text = cols[idx].text.strip()
-                        if header == "Product Name":
-                            # Extract only the variant-specific part
-                            row_data["type_size"] = extract_variant_size(cell_text, product_data["parent_name"])
-                        else:
-                            row_data[header.lower().replace("/", "_per_")] = cell_text
-                    
-                    # Map corresponding details for this variant
-                    variant_size = row_data["type_size"]
-                    if "dimensions_by_size" in product_data["details"]:
-                        for size, dims in product_data["details"]["dimensions_by_size"].items():
-                            if size.lower() in variant_size.lower():
-                                row_data["dimensions"] = dims
-                                break
-                    
-                    if "weights_by_size" in product_data["details"]:
-                        for size, weight in product_data["details"]["weights_by_size"].items():
-                            if size.lower() in variant_size.lower():
-                                row_data["fill_weight"] = weight
-                                break
-                    
-                    table_data.append(row_data)
-            
+                if len(cols) == len(header_mapping):  # Ensure the row matches the header count
+                    table_data.append({
+                        "item": cols[header_mapping.index("Item")].text.strip() if "Item" in header_mapping else "",
+                        "type_size": clean_type_size(
+                            product_data.get("parent_name", ""),
+                            cols[header_mapping.index("Product Name")].text.strip()
+                        ) if "Product Name" in header_mapping else "",
+                        "price_per_unit": cols[header_mapping.index("Price/Unit")].text.strip() if "Price/Unit" in header_mapping else "",
+                        "units_per_case": cols[header_mapping.index("Unit/Case")].text.strip() if "Unit/Case" in header_mapping else "",
+                    })
+                else:
+                    print(f"DEBUG: Skipped row with mismatched column count: {[col.text for col in cols]}")
+    
             product_data["table_data"] = table_data
         except Exception as e:
             product_data["table_data"] = []
             print(f"DEBUG: Failed to extract table data: {e}")
 
+        # Extract dynamic specs (Details)
+        try:
+            detail_section = driver.find_element(By.CSS_SELECTOR, "#detail")
+            keys = detail_section.find_elements(By.CSS_SELECTOR, ".col-1")
+            values = detail_section.find_elements(By.CSS_SELECTOR, ".col-2")
+
+            # Map keys to values dynamically
+            raw_details = {}
+            for key, value in zip(keys, values):
+                raw_details[key.text.strip()] = value.text.strip()
+            
+            # Parse details by variant
+            variant_details = parse_details_by_variant(raw_details)
+            
+            # Update table_data with corresponding details
+            for row in product_data["table_data"]:
+                type_size = row["type_size"]
+                print(f"DEBUG: Matching details for type_size: '{type_size}'")
+                # Find matching variant details
+                for variant, details in variant_details.items():
+                    print(f"DEBUG: Checking variant: '{variant}' with details: {details}")
+                    if type_size.lower() in variant.lower() or variant.lower() in type_size.lower():
+                        print(f"DEBUG: Found matching variant for type_size: '{type_size}' -> '{variant}'")
+                        row["details"] = details
+                        break
+                else:
+                    print(f"DEBUG: No specific variant match found for type_size: '{type_size}', using general details")
+                    row["details"] = raw_details
+            
+        except Exception as e:
+            product_data["details"] = {}
+            print(f"DEBUG: Failed to extract details: {e}")
+
+        print(f"Scraped product data: {product_data}")
         return product_data
 
     except Exception as e:
@@ -280,28 +262,21 @@ def save_to_csv(products, filename="products_with_details.csv"):
     # Collect all possible keys from 'details' across all products
     all_details_keys = set()
     for product in products:
-        if "details" in product and isinstance(product["details"], dict):
-            all_details_keys.update(product["details"].keys())
-
-    # Collect all possible keys from 'table_data' across all products
-    all_table_keys = set()
-    for product in products:
-        if "table_data" in product and isinstance(product["table_data"], list):
-            for table_row in product["table_data"]:
-                all_table_keys.update(table_row.keys())
+        if "table_data" in product:
+            for row in product["table_data"]:
+                if "details" in row and isinstance(row["details"], dict):
+                    all_details_keys.update(row["details"].keys())
 
     # Prepare header row
     base_headers = [
         "Category",
-        "Parent Product Name",  # New column for the parent product name
-        "Description",  # Combined column
+        "Parent Product Name",
+        "Description",
         "Images",
         "Product URL",
     ]
     # Replace "Item" with "SKU" in table headers
-    table_headers = [
-        f"SKU" if key == "item" else f"{key}" for key in sorted(all_table_keys)
-    ]
+    table_headers = ["SKU", "type_size", "price_per_unit", "units_per_case"]
     detail_headers = sorted(all_details_keys)  # Sort for consistency
     headers = base_headers + table_headers + detail_headers
 
@@ -319,45 +294,50 @@ def save_to_csv(products, filename="products_with_details.csv"):
                 ])
             )
 
-            # Handle rows for each `table_data` entry
-            if "table_data" in product and isinstance(product["table_data"], list) and product["table_data"]:
-                for table_row in product["table_data"]:
-                    # Base fields
-                    row = [
-                        product.get("category", ""),
-                        clean_text(product.get("parent_name", "")),  # Parent product name
-                        combined_description,  # Use the combined description
-                        "; ".join(clean_image_urls(product.get("images", []))),  # Clean image URLs
-                        clean_text(product.get("url", "")),
-                    ]
+            # Base fields that stay constant for all variants
+            base_row = [
+                product.get("category", ""),
+                clean_text(product.get("parent_name", "")),
+                combined_description,
+                "; ".join(clean_image_urls(product.get("images", []))),
+                clean_text(product.get("url", "")),
+            ]
 
-                    # Add table_data columns
-                    row += [
-                        clean_text(table_row.get("item", "")) if key == "item" else clean_text(table_row.get(key, ""))
-                        for key in sorted(all_table_keys)
-                    ]
+            # Handle rows for each variant in table_data
+            if "table_data" in product and isinstance(product["table_data"], list):
+                for variant in product["table_data"]:
+                    row = base_row.copy()
+                    
+                    # Clean type_size
+                    type_size = clean_text(variant.get("type_size", ""))
+                    
+                    # Add variant-specific data
+                    row.extend([
+                        clean_text(variant.get("item", "")),
+                        type_size,
+                        clean_text(variant.get("price_per_unit", "")),
+                        clean_text(variant.get("units_per_case", "")),
+                    ])
 
-                    # Add details columns
-                    row += [clean_text(product.get("details", {}).get(key, "")) for key in detail_headers]
+                    # Add variant-specific details
+                    variant_details = variant.get("details", {})
+                    # Only include details that match this variant's type_size
+                    for key in detail_headers:
+                        detail_value = variant_details.get(key, "")
+                        if key in ['Dimensions', 'Fill Weight', 'Shipping Carton', 'Shipping Carton Weight']:
+                            # Extract only the relevant dimension for this variant
+                            lines = detail_value.split('\n')
+                            for line in lines:
+                                if type_size.lower() in line.lower():
+                                    detail_value = line.split('-', 1)[-1].strip()
+                                    break
+                        row.append(clean_text(detail_value))
 
-                    writer.writerow(row)  # Write the row
+                    writer.writerow(row)
             else:
-                # If no table_data, write a single row with empty table_data columns
-                row = [
-                    product.get("category", ""),
-                    clean_text(product.get("parent_name", "")),  # Parent product name
-                    combined_description,
-                    "; ".join(clean_image_urls(product.get("images", []))),
-                    clean_text(product.get("url", "")),
-                ]
-
-                # Add empty table_data columns
-                row += ["" for _ in sorted(all_table_keys)]
-
-                # Add details columns
-                row += [clean_text(product.get("details", {}).get(key, "")) for key in detail_headers]
-
-                writer.writerow(row)  # Write the row
+                # If no variants, write a single row with empty variant fields
+                row = base_row + [""] * (len(table_headers) + len(detail_headers))
+                writer.writerow(row)
 
     print(f"Products saved to {filename}")
 
@@ -425,9 +405,65 @@ def format_details(details):
     """Format the details dictionary into a string for CSV."""
     return "; ".join([f"{clean_text(key)}: {clean_text(value)}" for key, value in details.items()])
 
+def clean_type_size(parent_name, type_size):
+    """
+    Clean type_size by removing parent_name and redundant information.
+    Returns only the unique variant information.
+    """
+    if not isinstance(type_size, str) or not isinstance(parent_name, str):
+        return type_size
+    
+    print(f"DEBUG: Cleaning type_size | Parent: '{parent_name}' | Original: '{type_size}'")
+    # Remove parent name from type_size
+    cleaned = type_size.replace(parent_name, '').strip()
+    # Remove common separators
+    cleaned = re.sub(r'^[-:,\s]+|[-:,\s]+$', '', cleaned)
+    result = cleaned or type_size  # Return original if cleaning results in empty string
+    print(f"DEBUG: Cleaned type_size result: '{result}'")
+    return result
 
-
-
+def parse_details_by_variant(details):
+    """
+    Parse the details section to map information to specific variants.
+    Returns a dictionary mapping variant sizes to their specific details.
+    """
+    print(f"DEBUG: Parsing details for variants: {details}")
+    variant_details = {}
+    
+    # Define fields that should be variant-specific
+    variant_specific_fields = ['Dimensions', 'Fill Weight', 'Shipping Carton', 'Shipping Carton Weight']
+    
+    for key, value in details.items():
+        if not isinstance(value, str):
+            continue
+            
+        print(f"DEBUG: Processing detail | Key: '{key}' | Value: '{value}'")
+        
+        if key in variant_specific_fields:
+            # Split on newlines for variant-specific fields
+            lines = value.split('\n')
+            for line in lines:
+                # Try to extract size/variant and its corresponding value
+                match = re.match(r'^(.*?(?:Standard|Queen|King|Twin|Full|Cal King))[\s-]+(.+)$', line.strip())
+                if match:
+                    variant, detail = match.groups()
+                    variant = variant.strip()
+                    detail = detail.strip()
+                    print(f"DEBUG: Matched variant-specific detail: '{variant}' -> '{detail}' for {key}")
+                    
+                    if variant not in variant_details:
+                        variant_details[variant] = {}
+                    variant_details[variant][key] = detail
+        else:
+            # For non-variant-specific fields, apply to all variants
+            print(f"DEBUG: Processing general detail: {key}")
+            for variant in set(variant_details.keys()) | {'Standard', 'Queen', 'King'}:
+                if variant not in variant_details:
+                    variant_details[variant] = {}
+                variant_details[variant][key] = value.strip()
+    
+    print(f"DEBUG: Final variant details mapping: {variant_details}")
+    return variant_details
 
 # Main Execution
 try:
@@ -436,12 +472,12 @@ try:
 
     # Step 2: Define the top-level categories and their URLs
     categories = [
-        {"name": "Pillows", "url": "https://www.keecohospitality.com/pillows/"},
-        {"name": "Comforters", "url": "https://www.keecohospitality.com/comforters/"},
-        {"name": "Protectors", "url": "https://www.keecohospitality.com/protectors/"},
-        {"name": "Mattress Pads", "url": "https://www.keecohospitality.com/mattress-pads/"},
-        {"name": "Sheet Sets", "url": "https://www.keecohospitality.com/sheet-sets/"},
-        {"name": "Bath", "url": "https://www.keecohospitality.com/bath/"},
+        {"name": "Pillows", "url": "https://www.keecohospitality.com/pillows/"},  # Testing with just Pillows category
+        # {"name": "Comforters", "url": "https://www.keecohospitality.com/comforters/"},
+        # {"name": "Protectors", "url": "https://www.keecohospitality.com/protectors/"},
+        # {"name": "Mattress Pads", "url": "https://www.keecohospitality.com/mattress-pads/"},
+        # {"name": "Sheet Sets", "url": "https://www.keecohospitality.com/sheet-sets/"},
+        # {"name": "Bath", "url": "https://www.keecohospitality.com/bath/"},
     ]
 
     # Step 3: Extract products from each category
