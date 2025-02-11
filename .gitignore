@@ -38,6 +38,10 @@ ENV/
 *.swo
 .DS_Store
 
+# Visual Studio
+.vs/
+
+
 # Generated files
 *.csv
 error_screenshot.png

@@ -2,22 +2,22 @@ import pandas as pd
 import re
 import psycopg2
 from psycopg2.extras import execute_values
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 import json
-import os
 
 # Load environment variables from .env file
-load_dotenv()
+env_path = r"C:\\Users\\juddu\\Downloads\\PAM\\Staging Area\\Keeco\\.env"
+config = dotenv_values(env_path)
 
 # Database connection details
-DB_NAME = os.getenv('DB_NAME')
-DB_USER = os.getenv('DB_USER')
-DB_PASSWORD = os.getenv('DB_PASSWORD')
-DB_HOST = os.getenv('DB_HOST')
-DB_PORT = os.getenv('DB_PORT')
+DB_NAME = config['DB_NAME']
+DB_USER = config['DB_USER']
+DB_PASSWORD = config['DB_PASSWORD']
+DB_HOST = config['DB_HOST']
+DB_PORT = config['DB_PORT']
 
 # Define the file path
-file_path = r"Hospitality General Line Price List New Hookless Pricing 110624 final.xlsx"
+file_path = r"C:\\Users\\juddu\\Downloads\\PAM\\Staging Area\\Keeco\\Hospitality General Line Price List New Hookless Pricing 110624 final.xlsx"
 
 # Load the Excel file
 sheet_name = "keeco"
