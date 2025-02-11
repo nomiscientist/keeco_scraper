@@ -407,18 +407,49 @@ def format_details(details):
 
 def clean_type_size(parent_name, type_size):
     """
-    Clean type_size by removing parent_name and redundant information.
-    Returns only the unique variant information.
+    Clean and standardize type_size by removing parent product information and 
+    standardizing size formats. Returns only the unique variant information.
     """
     if not isinstance(type_size, str) or not isinstance(parent_name, str):
         return type_size
     
     print(f"DEBUG: Cleaning type_size | Parent: '{parent_name}' | Original: '{type_size}'")
+    
+    # Define standard size mappings
+    size_mappings = {
+        r'\bSTD\b|\bSTANDARD\b': 'Standard',
+        r'\bKING\b': 'King',
+        r'\bCAL[IFORNIA]*\s*KING\b': 'Cal King',
+        r'\bQUEEN\b': 'Queen',
+        r'\bFULL\b': 'Full',
+        r'\bTWIN\s*XL\b': 'Twin XL',
+        r'\bTWIN\b': 'Twin',
+        r'\bJUMBO\b': 'Jumbo',
+        r'\bEURO\b': 'Euro'
+    }
+    
     # Remove parent name from type_size
     cleaned = type_size.replace(parent_name, '').strip()
-    # Remove common separators
+    
+    # Remove common separators and extra whitespace
     cleaned = re.sub(r'^[-:,\s]+|[-:,\s]+$', '', cleaned)
-    result = cleaned or type_size  # Return original if cleaning results in empty string
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    
+    # Convert to title case for consistent capitalization
+    cleaned = cleaned.title()
+    
+    # Apply size standardization
+    for pattern, replacement in size_mappings.items():
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    
+    # Clean up any remaining artifacts
+    cleaned = re.sub(r'\s*-\s*', '-', cleaned)  # Standardize hyphens
+    cleaned = re.sub(r'\s*,\s*', ', ', cleaned)  # Standardize commas
+    cleaned = re.sub(r'\s+', ' ', cleaned)  # Remove double spaces
+    
+    # If cleaning results in empty string, return original
+    result = cleaned.strip() or type_size
+    
     print(f"DEBUG: Cleaned type_size result: '{result}'")
     return result
 
