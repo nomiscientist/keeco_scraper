@@ -72,12 +72,43 @@ def login_to_site():
         sys.exit(1)
 
 def extract_variant_size(product_name, parent_name):
-    """Extract the variant-specific size/type from the product name."""
+    """
+    Extract and standardize the variant-specific size/type from the product name
+    by removing parent name and standardizing common size patterns.
+    """
     if not product_name or not parent_name:
         return ""
-    # Remove parent name from product name to get variant-specific info
-    variant = product_name.replace(parent_name, "").strip(" -")
-    return variant if variant else product_name
+        
+    # Remove parent name and any leading/trailing delimiters
+    variant = product_name.replace(parent_name, "").strip(" -,")
+    
+    # If nothing left after removing parent name, return original product name
+    if not variant:
+        return product_name
+        
+    # Standardize common size patterns
+    # Convert variations of King, Queen, etc. to standard format
+    size_mappings = {
+        r'\bKING\b': 'King',
+        r'\bQUEEN\b': 'Queen',
+        r'\bFULL\b': 'Full',
+        r'\bTWIN\b': 'Twin',
+        r'\bTWIN XL\b': 'Twin XL',
+        r'\bSTANDARD\b': 'Standard',
+        r'\bJUMBO\b': 'Jumbo'
+    }
+    
+    # Apply size standardization
+    variant_upper = variant.upper()
+    for pattern, replacement in size_mappings.items():
+        if re.search(pattern, variant_upper):
+            variant = re.sub(pattern, replacement, variant_upper, flags=re.IGNORECASE)
+            
+    # Remove any double spaces and standardize separators
+    variant = re.sub(r'\s+', ' ', variant)
+    variant = re.sub(r'\s*-\s*', '-', variant)
+    
+    return variant.strip()
 
 def parse_dimensions(dimension_str):
     """Parse dimension string to extract size-specific dimensions."""
