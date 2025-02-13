@@ -8,9 +8,11 @@ from dotenv import load_dotenv
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 import undetected_chromedriver as uc
 import unicodedata
 from ftfy import fix_text
+import time
 
 # Load .env file
 dotenv_path = r'.env'
@@ -196,55 +198,223 @@ def scrape_product_page(product_url):
         print(f"Error scraping product page: {e}")
         return {"url": product_url, "error": str(e)}
 
-# Function to extract products from a category
-def extract_products_from_category(category_name, category_url):
-    driver.get(category_url)
-    products = []
-    print(f"Extracting products from {category_name}...")
-
-    while True:
+def refresh_session():
+    """Refresh the browser session if needed."""
+    global driver  # Add global declaration
+    try:
+        # Test if session is still valid
+        driver.current_url
+        return True
+    except Exception:
+        print("Session expired, refreshing...")
         try:
-            # Wait for the product grid to load
-            WebDriverWait(driver, 10).until(
+            # Re-initialize driver
+            driver.quit()
+            options = uc.ChromeOptions()
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            driver = uc.Chrome(
+                options=options,
+                version_main=132
+            )
+            driver.set_window_size(1920, 1080)
+            
+            # Re-login
+            login_to_site()
+            return True
+        except Exception as e:
+            print(f"Failed to refresh session: {e}")
+            return False
+
+def get_fresh_elements(driver, selector, timeout=30):
+    """Get fresh elements with retry logic for stale elements."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            elements = WebDriverWait(driver, 5).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+            )
+            # Verify elements are not stale
+            for element in elements:
+                try:
+                    _ = element.is_displayed()
+                except:
+                    raise Exception("Stale element found")
+            return elements
+        except Exception as e:
+            print(f"Retrying to get fresh elements: {str(e)}")
+            time.sleep(1)
+    raise Exception(f"Could not get fresh elements after {timeout} seconds")
+
+def get_product_links(driver):
+    """Get all product links from the current page."""
+    links = []
+    max_attempts = 3
+    delay = 2
+    
+    for attempt in range(max_attempts):
+        try:
+            # Wait for product grid
+            WebDriverWait(driver, 30).until(
                 EC.presence_of_element_located((By.ID, "search-result-items"))
             )
+            
+            # Get all product links directly using XPath
+            elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'product-tile')]//a[contains(@class, 'name-link')]")
+            
+            # Extract href attributes
+            for element in elements:
+                try:
+                    link = element.get_attribute("href")
+                    if link and link not in links:
+                        links.append(link)
+                except:
+                    continue
+            
+            if links:
+                return links
+                
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed to get product links: {str(e)}")
+            if attempt < max_attempts - 1:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                print("Failed to get product links after all attempts")
+                return []
+    
+    return links
 
-            # Extract product links from the grid
-            product_grid = driver.find_element(By.ID, "search-result-items")
-            product_elements = product_grid.find_elements(By.CSS_SELECTOR, ".product-tile a")
-            print(f"DEBUG: Found {len(product_elements)} product elements on the page.")
-
-            # Extract links and remove duplicates
-            product_links = list(set([element.get_attribute("href") for element in product_elements]))
-            print(f"DEBUG: Unique product links found: {product_links}")
-
-            # Click and scrape each product
+def extract_products_from_category(category_name, category_url):
+    global driver
+    driver.get(category_url)
+    products = []
+    processed_urls = set()  # Keep track of processed URLs
+    print(f"Extracting products from {category_name}...")
+    
+    while True:
+        try:
+            # Get all product links on current page
+            product_links = get_product_links(driver)
+            print(f"DEBUG: Found {len(product_links)} product links on the page.")
+            
+            if not product_links:
+                print("No product links found on page, trying to refresh session...")
+                if not refresh_session():
+                    break
+                continue
+            
+            # Process each product link
             for product_link in product_links:
-                if product_link:
-                    print(f"DEBUG: Clicking on product link: {product_link}")
-                    product_details = scrape_product_page(product_link)
-                    product_details["category"] = category_name
-                    products.append(product_details)
-                else:
-                    print("DEBUG: Skipped an empty product link.")
-
+                try:
+                    if product_link in processed_urls:
+                        print(f"DEBUG: Already processed: {product_link}")
+                        continue
+                    
+                    processed_urls.add(product_link)
+                    print(f"DEBUG: Processing product: {product_link}")
+                    
+                    # Process the product
+                    product_details = process_product(product_link)
+                    if product_details:
+                        product_details["category"] = category_name
+                        products.append(product_details)
+                        print(f"Successfully processed product: {product_link}")
+                    
+                    # Add a small delay between products
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    print(f"ERROR: Failed to process product: {str(e)}")
+                    if not refresh_session():
+                        break
+                    continue
+            
             # Check for next page
             try:
-                next_button = driver.find_element(By.CSS_SELECTOR, ".pagination .next")
+                next_button = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".pagination .next"))
+                )
+                
                 if "disabled" in next_button.get_attribute("class"):
+                    print("DEBUG: Reached last page in category.")
                     break
-                next_button.click()
-                WebDriverWait(driver, 10).until(EC.staleness_of(product_grid))  # Wait for the page to refresh
-            except Exception:
-                print("DEBUG: No more pages in this category.")
+                
+                print("DEBUG: Clicking next page button...")
+                driver.execute_script("arguments[0].click();", next_button)
+                
+                # Wait for page to load
+                time.sleep(2)
+                
+            except Exception as e:
+                print(f"DEBUG: No more pages in this category: {str(e)}")
                 break
-
+            
         except Exception as e:
-            print(f"Error loading products from category: {e}")
-            break
-
+            print(f"Error loading products from category: {str(e)}")
+            if not refresh_session():
+                break
+    
     return products
 
+def process_product(product_url, max_retries=3):
+    """Process a single product with retry logic."""
+    global driver
+    retry_delay = 2
+    original_url = driver.current_url
+    
+    for attempt in range(max_retries):
+        try:
+            # Navigate to product
+            driver.get(product_url)
+            
+            # Wait for product content with multiple conditions
+            try:
+                WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.ID, "product-content"))
+                )
+                WebDriverWait(driver, 30).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "product-detail"))
+                )
+            except Exception as e:
+                print(f"Error waiting for product content: {e}")
+                driver.get(original_url)
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                return None
+            
+            # Add a small delay to ensure content is fully loaded
+            time.sleep(2)
+            
+            # Scrape product details
+            product_details = scrape_product_page(product_url)
+            
+            # Return to previous page
+            driver.get(original_url)
+            time.sleep(1)
+            
+            return product_details
+            
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed for {product_url}: {str(e)}")
+            try:
+                driver.get(original_url)
+            except:
+                if not refresh_session():
+                    return None
+            
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                print(f"Failed to process product after {max_retries} attempts")
+                return None
+    
+    return None
 
 def clean_text(text):
     """Clean up text by fixing encoding issues and normalizing."""
@@ -606,6 +776,7 @@ def save_to_csv(products, filename="products_with_details.csv"):
                 writer.writerow(base_row)
 
     print(f"Products saved to {filename}")
+    print(f"Total products saved: {len(products)}")
 
 def insert_into_postgres(table_name, data):
     """
@@ -754,31 +925,87 @@ def standardize_case_info(units_per_case):
     return ""
 
 # Main Execution
-try:
-    # Step 1: Login
-    login_to_site()
-
-    # Step 2: Define the top-level categories and their URLs
-    categories = [
-        {"name": "Pillows", "url": "https://www.keecohospitality.com/pillows/"},  # Testing with just Pillows category
-        # {"name": "Comforters", "url": "https://www.keecohospitality.com/comforters/"},
-        # {"name": "Protectors", "url": "https://www.keecohospitality.com/protectors/"},
-        # {"name": "Mattress Pads", "url": "https://www.keecohospitality.com/mattress-pads/"},
-        # {"name": "Sheet Sets", "url": "https://www.keecohospitality.com/sheet-sets/"},
-        # {"name": "Bath", "url": "https://www.keecohospitality.com/bath/"},
-    ]
-
-    # Step 3: Extract products from each category
+def main():
     all_products = []
-    for category in categories:
-        products = extract_products_from_category(category["name"], category["url"])
-        all_products.extend(products)
+    try:
+        # Step 1: Login
+        login_to_site()
 
-    # Step 4: Save all products to a CSV file
-    save_to_csv(all_products)
+        # Step 2: Define the top-level categories and their URLs
+        categories = [
+            {"name": "Pillows", "url": "https://www.keecohospitality.com/pillows/"},
+            {"name": "Comforters", "url": "https://www.keecohospitality.com/comforters/"},
+            {"name": "Protectors", "url": "https://www.keecohospitality.com/protectors/"},
+            {"name": "Mattress Pads", "url": "https://www.keecohospitality.com/mattress-pads/"},
+            {"name": "Sheet Sets", "url": "https://www.keecohospitality.com/sheet-sets/"},
+            {"name": "Bath", "url": "https://www.keecohospitality.com/bath/"},
+        ]
 
-except Exception as e:
-    print(f"An error occurred: {e}")
-    driver.save_screenshot("error_screenshot.png")
-finally:
-    driver.quit()
+        # Step 3: Extract products from each category
+        total_products = 0
+        for i, category in enumerate(categories, 1):
+            try:
+                print(f"\n{'='*50}")
+                print(f"Processing category {i} of {len(categories)}: {category['name']}")
+                print(f"{'='*50}\n")
+                
+                products = extract_products_from_category(category["name"], category["url"])
+                all_products.extend(products)
+                total_products += len(products)
+                print(f"Successfully processed {len(products)} products from {category['name']}")
+                
+                # Save incremental backup
+                save_to_csv(all_products, f"products_with_details_{i}_of_{len(categories)}_backup.csv")
+                print(f"Backup saved to products_with_details_{i}_of_{len(categories)}_backup.csv")
+                
+                # Save consolidated data after each category
+                save_to_csv(all_products, "products_with_details.csv")
+                print(f"Updated consolidated data in products_with_details.csv (Total: {len(all_products)} products)")
+                
+            except Exception as category_error:
+                print(f"Error processing category {category['name']}: {str(category_error)}")
+                # Save progress before moving to next category
+                if all_products:
+                    save_to_csv(all_products, f"products_with_details_error_at_{i}_of_{len(categories)}.csv")
+                    print(f"Progress saved to products_with_details_error_at_{i}_of_{len(categories)}.csv")
+                    # Also update the main consolidated file
+                    save_to_csv(all_products, "products_with_details.csv")
+                continue
+
+        # Step 4: Print final summary
+        if all_products:
+            print(f"\n{'='*50}")
+            print("Final Summary:")
+            print(f"{'='*50}")
+            print(f"Total products processed: {len(all_products)}")
+            print(f"Categories processed: {len(categories)}")
+            print("All data has been saved to products_with_details.csv")
+            
+            # Calculate category-wise breakdown
+            category_counts = {}
+            for product in all_products:
+                category = product.get("category", "Unknown")
+                category_counts[category] = category_counts.get(category, 0) + 1
+            
+            print("\nCategory-wise breakdown:")
+            for category, count in category_counts.items():
+                print(f"{category}: {count} products")
+        else:
+            print("\nNo products were processed successfully.")
+
+    except Exception as e:
+        print(f"An error occurred in main execution: {e}")
+        if all_products:
+            save_to_csv(all_products, "products_with_details_error_recovery.csv")
+            print("Partial results saved to products_with_details_error_recovery.csv")
+            # Also update the main consolidated file
+            save_to_csv(all_products, "products_with_details.csv")
+        driver.save_screenshot("error_screenshot.png")
+    finally:
+        try:
+            driver.quit()
+        except Exception as e:
+            print(f"Error while closing driver: {e}")
+
+if __name__ == "__main__":
+    main()
